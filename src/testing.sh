@@ -1,44 +1,71 @@
 #!/bin/bash
 
-function compiling {
-	echo "$1" | ./nc > tmp.s
-	if [ $? -ne 0 ]; then
-		echo "Compilation Falied for: $1"
-		exit
-	fi
-	gcc -o tmp.out parser.c tmp.s
-	if [ $? -ne 0 ]; then
-		echo "GCC Error"
-		exit
-	fi
+function compile {
+  echo "$1" | ./nc > tmp.s
+  if [ $? -ne 0 ]; then
+    echo "Failed to compile $1"
+    exit
+  fi
+  gcc -o tmp.out parser.c tmp.s
+  if [ $? -ne 0 ]; then
+    echo "GCC failed"
+    exit
+  fi
 }
 
-function testing {
-	wanted="$1"
-	got="$2"
-	compiling "$got"
-	result=$(./tmp.out)
-	echo "$result"
-	if [ "$result" != $wanted ]; then
-		echo "Testing failed. $wanted was expected but I got $got"
-		exit
-	fi
+function assertequal {
+  if [ "$1" != "$2" ]; then
+    echo "Test failed: $2 expected but got $1"
+    exit
+  fi
 }
 
-function uncertain_tests {
-	arg1="$1"
-	echo "$arg1" | ./nc > /dev/null 2>&1
-	if [ $? -eq 0 ]; then
-		echo "Should Fail, but compiled successfully: $arg1"
-		#exit
-	else
-		echo "Failed to compile symbol: $arg1"
-	fi
+function testast {
+  result="$(echo "$2" | ./nc -a)"
+  if [ $? -ne 0 ]; then
+    echo "Failed to compile $1"
+    exit
+  fi
+  assertequal "$result" "$1"
+}
+
+function test {
+  compile "$2"
+  assertequal "$(./tmp.out)" "$1"
+}
+
+function testfail {
+  expr="$1"
+  echo "$expr" | ./nc > /dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    echo "Should fail to compile, but succeded: $expr"
+    exit
+  fi
 }
 
 make -s nc
-testing 0 0
-testing abc '"abc"'
-uncertain_tests '"abc"'
-rm -f tmp.out tmp.s
-echo "testing done. success"
+
+testast '1' '1'
+testast '(+ (- (+ 1 2) 3) 4)' '1+2-3+4'
+testast '(+ (+ 1 (* 2 3)) 4)' '1+2*3+4'
+testast '(+ (* 1 2) (* 3 4))' '1*2+3*4'
+testast '(+ (/ 4 2) (/ 6 3))' '4/2+6/3'
+testast '(/ (/ 24 2) 4)' '24/2/4'
+
+test 0 0
+test abc '"abc"'
+
+test 3 '1+2'
+test 3 '1 + 2'
+test 10 '1+2+3+4'
+test 11 '1+2*3+4'
+test 14 '1*2+3*4'
+test 4 '4/2+6/3'
+test 3 '24/2/4'
+
+testfail '"abc'
+testfail '0abc'
+testfail '1+'
+testfail '1+"abc"'
+
+echo "All tests passed"

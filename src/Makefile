@@ -1,3 +1,5 @@
+CFLAGS: -Wall
+
 nc: nc.o
 
 clean:
