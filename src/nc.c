@@ -5,10 +5,12 @@
 #include <string.h>
 
 #define MAX_BUFFER_LENGTH 256
+#define MAX_ARGS 6
 
 enum {
   AST_NUMBER,
   AST_SYMBOL,
+  AST_FUNCTION_CALL,
 };
 
 typedef struct Var {
@@ -27,13 +29,20 @@ typedef struct AST {
       struct AST *left;
       struct AST *right;
     };
+    struct {
+      char *fname;
+      int nargs;
+      struct AST **args;
+    };
   };
 }  AST;
 
 Var *vars = NULL;
+char *REGS[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 void error(char *fmt, ...) __attribute__((noreturn));
 AST *read_expr(void);
 void emit_expr(AST *ast);
+AST *read_expr2(int prec);
 
 void error(char *fmt, ...) {
   va_list args;
@@ -66,9 +75,18 @@ AST *make_ast_sym(Var *var) {
   return r;
 }
 
+AST *make_ast_funcall(char *fname, int nargs, AST **args) {
+  AST *r = malloc(sizeof(AST));
+  r->type = AST_FUNCTION_CALL;
+  r->fname = fname;
+  r->nargs = nargs;
+  r->args = args;
+  return r;
+}
+
+
 Var *find_var(char *name) {
- Var *v = vars;
- for (; v; v = v->next) {
+for (Var *v = vars; v; v = v->next) {
     if (!strcmp(name, v->name))
       return v;
   }
@@ -120,23 +138,53 @@ AST *read_number(int n) {
   }
 }
 
-AST *read_symbol(c) {
+char *read_ident(char c) {
   char *buf = malloc(MAX_BUFFER_LENGTH);
   buf[0] = c;
   int i = 1;
   while(1) {
     int c = getc(stdin);
-    if (!isalpha(c)) {
+    if (!isalnum(c)) {
       ungetc(c, stdin);
       break;
     }
     buf[i++] = c;
     if (i == MAX_BUFFER_LENGTH - 1)
-      error("Symbol too long");
+      error("Identifier too long");
   }
   buf[i] = '\0';
-  Var *v = find_var(buf);
-  if (!v) v = make_var(buf);
+  return buf;
+}
+
+AST *read_func_args(char *fname) {
+  AST **args = malloc(sizeof(AST*) * (MAX_ARGS + 1));
+  int i = 0, nargs = 0;
+  for (; i < MAX_ARGS; i++) {
+    skip_space();
+    char c = getc(stdin);
+   if (c == ')') break;
+    ungetc(c, stdin);
+    args[i] = read_expr2(0);
+    nargs++;
+    c = getc(stdin);
+    if (c == ')') break;
+    if (c == ',') skip_space();
+    else error("Unexpected character: '%c'", c);
+  }
+  if (i == MAX_ARGS)
+    error("Too many arguments: %s", fname);
+  return make_ast_funcall(fname, nargs, args);
+}
+
+AST *read_ident_or_func(char c) {
+  char *name = read_ident(c);
+  skip_space();
+  char c2 = getc(stdin);
+  if (c2 == '(')
+    return read_func_args(name);
+  ungetc(c2, stdin);
+  Var *v = find_var(name);
+  if (!v) v = make_var(name);
   return make_ast_sym(v);
 }
 
@@ -146,7 +194,7 @@ AST *read_prim(void) {
   if (isdigit(c))
     return read_number(c - '0');
   if (isalpha(c))
-    return read_symbol(c);
+    return read_ident_or_func(c);
   else if (c == EOF)
     return NULL;
   error("Don't know how to handle '%c'", c);
@@ -222,6 +270,20 @@ void emit_expr(AST *ast) {
     case AST_SYMBOL:
       printf("mov -%d(%%rbp), %%eax\n\t", ast->var->pos * 4);
       break;
+    case AST_FUNCTION_CALL:
+      for (int i = 1; i < ast->nargs; i++)
+        printf("push %%%s\n\t", REGS[i]);
+      for (int i = 0; i < ast->nargs; i++) {
+        emit_expr(ast->args[i]);
+        printf("push %%rax\n\t");
+      }
+      for (int i = ast->nargs - 1; i >= 0; i--)
+        printf("pop %%%s\n\t", REGS[i]);
+      printf("mov $0, %%eax\n\t");
+      printf("call %s\n\t", ast->fname);
+      for (int i = ast->nargs - 1; i > 0; i--)
+        printf("pop %%%s\n\t", REGS[i]);
+      break;
     default:
       emit_binop(ast);
   }
@@ -234,6 +296,15 @@ void print_ast(AST *ast) {
       break;
     case AST_SYMBOL:
       printf("%s", ast->var->name);
+      break;
+    case AST_FUNCTION_CALL:
+      printf("%s(", ast->fname);
+      for (int i = 0; ast->args[i]; i++) {
+        print_ast(ast->args[i]);
+        if (ast->args[i + 1])
+          printf(",");
+      }
+      printf(")");
       break;
     default:
       printf("(%c ", ast->type);
