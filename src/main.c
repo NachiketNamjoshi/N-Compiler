@@ -1,57 +1,60 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
 #include <stdarg.h>
 #include <string.h>
+#include "nc.h"
 
-#define MAX_BUFFER_LENGTH 256
-#define MAX_ARGS 6
 #define EXPR_LEN 100
+#define MAX_ARGS 6
 
 enum {
-  AST_NUMBER,
+  AST_INT,
+  AST_CHAR,
   AST_VAR,
-  AST_FUNCTION_CALL,
-  AST_STRING,
-  AST_CHARACTER,
+  AST_STR,
+  AST_FUNCALL,
 };
 
 typedef struct AST {
   char type;
   union {
-    int num_val; // Ints
-    char c; // for char
-    struct {     //for Strings
+    // Integer
+    int ival;
+    // Char
+    char c;
+    // String
+    struct {
       char *sval;
       int sid;
       struct AST *snext;
     };
-
-    struct {    // Variable
+    // Variable
+    struct {
       char *vname;
       int vpos;
       struct AST *vnext;
     };
-    struct {    // Binary
+    // Binary operator
+    struct {
       struct AST *left;
       struct AST *right;
     };
-    struct {    // Functions
+    // Function call
+    struct {
       char *fname;
       int nargs;
       struct AST **args;
     };
   };
-}  AST;
+} AST;
 
 AST *vars = NULL;
 AST *strings = NULL;
 char *REGS[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
-void error(char *fmt, ...) __attribute__((noreturn));
-AST *read_expr(void);
+
 void emit_expr(AST *ast);
 AST *read_expr2(int prec);
-
+AST *read_expr(void);
 
 void error(char *fmt, ...) {
   va_list args;
@@ -61,14 +64,6 @@ void error(char *fmt, ...) {
   va_end(args);
   exit(1);
 }
-
-AST *make_ast_char(char c) {
-  AST *r = malloc(sizeof(AST));
-  r->type = AST_CHARACTER;
-  r->c = c;
-  return r;
-}
-
 
 AST *make_ast_op(char type, AST *left, AST *right) {
   AST *r = malloc(sizeof(AST));
@@ -80,8 +75,15 @@ AST *make_ast_op(char type, AST *left, AST *right) {
 
 AST *make_ast_int(int val) {
   AST *r = malloc(sizeof(AST));
-  r->type = AST_NUMBER;
-  r->num_val = val;
+  r->type = AST_INT;
+  r->ival = val;
+  return r;
+}
+
+AST *make_ast_char(char c) {
+  AST *r = malloc(sizeof(AST));
+  r->type = AST_CHAR;
+  r->c = c;
   return r;
 }
 
@@ -95,9 +97,9 @@ AST *make_ast_var(char *vname) {
   return r;
 }
 
-AST *make_ast_str(char *str) {
+AST *make_ast_string(char *str) {
   AST *r = malloc(sizeof(AST));
-  r->type = AST_STRING;
+  r->type = AST_STR;
   r->sval = str;
   if (strings == NULL) {
     r->sid = 0;
@@ -112,201 +114,116 @@ AST *make_ast_str(char *str) {
 
 AST *make_ast_funcall(char *fname, int nargs, AST **args) {
   AST *r = malloc(sizeof(AST));
-  r->type = AST_FUNCTION_CALL;
+  r->type = AST_FUNCALL;
   r->fname = fname;
   r->nargs = nargs;
   r->args = args;
   return r;
 }
 
-
 AST *find_var(char *name) {
-for (AST *p = vars; p; p = p->vnext) {
+  for (AST *p = vars; p; p = p->vnext) {
     if (!strcmp(name, p->vname))
       return p;
   }
   return NULL;
 }
 
-void skip_space(void) {
-  int c;
-  while ((c = getc(stdin)) != EOF) {
-    if (isspace(c))
-      continue;
-    ungetc(c, stdin);
-    return;
-  }
-}
-
 int priority(char op) {
   switch (op) {
     case '=':
       return 1;
-    case '+':
-    case '-':
-        return 2;
-    case '*':
-    case '/':
-        return 3;
+    case '+': case '-':
+      return 2;
+    case '*': case '/':
+      return 3;
     default:
-        return -1;
+      return -1;
   }
-}
-
-AST *read_number(int n) {
-  for (;;) {
-    int c = getc(stdin);
-    if (!isdigit(c)) {
-      ungetc(c, stdin);
-      return make_ast_int(n);
-    }
-    n = n * 10 + (c - '0');
-  }
-}
-
-char *read_ident(char c) {
-  char *buf = malloc(MAX_BUFFER_LENGTH);
-  buf[0] = c;
-  int i = 1;
-  while(1) {
-    int c = getc(stdin);
-    if (!isalnum(c)) {
-      ungetc(c, stdin);
-      break;
-    }
-    buf[i++] = c;
-    if (i == MAX_BUFFER_LENGTH - 1)
-      error("Identifier too long");
-  }
-  buf[i] = '\0';
-  return buf;
 }
 
 AST *read_func_args(char *fname) {
   AST **args = malloc(sizeof(AST*) * (MAX_ARGS + 1));
   int i = 0, nargs = 0;
   for (; i < MAX_ARGS; i++) {
-    skip_space();
-    char c = getc(stdin);
-   if (c == ')') break;
-    ungetc(c, stdin);
+    Token *tok = read_token();
+    if (is_punct(tok, ')')) break;
+    unget_token(tok);
     args[i] = read_expr2(0);
     nargs++;
-    c = getc(stdin);
-    if (c == ')') break;
-    if (c == ',') skip_space();
-    else error("Unexpected character: '%c'", c);
+    tok = read_token();
+    if (is_punct(tok, ')')) break;
+    if (!is_punct(tok, ','))
+      error("Unexpected token: '%s'", token_to_string(tok));
   }
   if (i == MAX_ARGS)
     error("Too many arguments: %s", fname);
   return make_ast_funcall(fname, nargs, args);
 }
 
-AST *read_ident_or_func(char c) {
-  char *name = read_ident(c);
-  skip_space();
-  char c2 = getc(stdin);
-  if (c2 == '(')
+AST *read_ident_or_func(char *name) {
+  Token *tok = read_token();
+  if (is_punct(tok, '('))
     return read_func_args(name);
-  ungetc(c2, stdin);
+  unget_token(tok);
   AST *v = find_var(name);
   return v ? v : make_ast_var(name);
 }
 
-AST *read_char(void) {
-  char c = getc(stdin);
-  if (c == EOF) 
-    goto err;
-  if (c == '\\') {
-    c = getc(stdin);
-    if (c == EOF) 
-      goto err;
-  }
-  char c2 = getc(stdin);
-  if (c2 == EOF) 
-    goto err;
-  if (c2 != '\'')
-    error("Malformed char constant");
-  return make_ast_char(c);
-err:
-  error("Unterminated char");
-}
-
-AST *read_string(void) {
-  char *buf = malloc(MAX_BUFFER_LENGTH);
-  int i = 0;
-  for (;;) {
-    int c = getc(stdin);
-    if (c == EOF)
-      error("Unterminated string");
-    if (c == '"')
-      break;
-    if (c == '\\') {
-      c = getc(stdin);
-     if (c == EOF) error("Unterminated \\");
-    }
-    buf[i++] = c;
-    if (i == MAX_BUFFER_LENGTH - 1)
-      error("String too long");
-  }
-  buf[i] = '\0';
-  return make_ast_str(buf);
-}
-
 AST *read_prim(void) {
-  int c = getc(stdin);
-  if (isdigit(c))
-    return read_number(c - '0');
-  if (c == '"')
-    return read_string();
-  if (c == '\'')
-    return read_char();
-  if (isalpha(c))
-    return read_ident_or_func(c);
-  else if (c == EOF)
-    return NULL;
-  error("Don't know how to handle '%c'", c);
+  Token *tok = read_token();
+  if (!tok) return NULL;
+  switch (tok->type) {
+    case TTYPE_IDENT:
+      return read_ident_or_func(tok->sval);
+    case TTYPE_INT:
+      return make_ast_int(tok->ival);
+    case TTYPE_CHAR:
+      return make_ast_char(tok->c);
+    case TTYPE_STRING:
+      return make_ast_string(tok->sval);
+    case TTYPE_PUNCT:
+      error("unexpected character: '%c'", tok->punct);
+    default:
+      error("internal error: unknown token type: %d", tok->type);
+  }
 }
 
 AST *read_expr2(int prec) {
-  skip_space();
   AST *ast = read_prim();
-  if(!ast)
-    return NULL;
+  if (!ast) return NULL;
   for (;;) {
-    skip_space();
-    int c = getc(stdin);
-    if (c == EOF) return ast;
-    int prec2 = priority(c);
-    if (prec2 < 0 || prec2 < prec) {
-      ungetc(c, stdin);
+    Token *tok = read_token();
+    if (tok->type != TTYPE_PUNCT) {
+      unget_token(tok);
       return ast;
     }
-    skip_space();
-    ast = make_ast_op(c, ast, read_expr2(prec2 + 1));
+    int prec2 = priority(tok->punct);
+    if (prec2 < 0 || prec2 < prec) {
+      unget_token(tok);
+      return ast;
+    }
+    ast = make_ast_op(tok->punct, ast, read_expr2(prec2 + 1));
   }
-  return ast;
 }
 
 AST *read_expr(void) {
   AST *r = read_expr2(0);
   if (!r) return NULL;
-  skip_space();
-  int c = getc(stdin);
-  if (c != ';')
-    error("Unterminated expression");
+  Token *tok = read_token();
+  if (!is_punct(tok, ';'))
+    error("Unterminated expression: %s", token_to_string(tok));
   return r;
 }
 
 void emit_binop(AST *ast) {
   if (ast->type == '=') {
-   emit_expr(ast->right);
-  if (ast->left->type != AST_VAR)
-    error("Symbol expected");
-  printf("mov %%eax, -%d(%%rbp)\n\t", ast->left->vpos * 4);
-  return;
+    emit_expr(ast->right);
+    if (ast->left->type != AST_VAR)
+      error("Symbol expected");
+    printf("mov %%eax, -%d(%%rbp)\n\t", ast->left->vpos * 4);
+    return;
   }
-
   char *op;
   switch (ast->type) {
     case '+': op = "add"; break;
@@ -315,7 +232,6 @@ void emit_binop(AST *ast) {
     case '/': break;
     default: error("invalid operator '%c'", ast->type);
   }
-
   emit_expr(ast->left);
   printf("push %%rax\n\t");
   emit_expr(ast->right);
@@ -332,13 +248,19 @@ void emit_binop(AST *ast) {
 
 void emit_expr(AST *ast) {
   switch (ast->type) {
-    case AST_NUMBER:
-      printf("mov $%d, %%eax\n\t", ast->num_val);
+    case AST_INT:
+      printf("mov $%d, %%eax\n\t", ast->ival);
+      break;
+    case AST_CHAR:
+      printf("mov $%d, %%eax\n\t", ast->c);
       break;
     case AST_VAR:
       printf("mov -%d(%%rbp), %%eax\n\t", ast->vpos * 4);
       break;
-    case AST_FUNCTION_CALL:
+    case AST_STR:
+      printf("lea .s%d(%%rip), %%rax\n\t", ast->sid);
+      break;
+    case AST_FUNCALL:
       for (int i = 1; i < ast->nargs; i++)
         printf("push %%%s\n\t", REGS[i]);
       for (int i = 0; i < ast->nargs; i++) {
@@ -351,12 +273,6 @@ void emit_expr(AST *ast) {
       printf("call %s\n\t", ast->fname);
       for (int i = ast->nargs - 1; i > 0; i--)
         printf("pop %%%s\n\t", REGS[i]);
-      break;
-    case AST_STRING:
-      printf("lea .s%d(%%rip), %%rax\n\t", ast->sid);
-      break;
-    case AST_CHARACTER:
-      printf("mov $%d, %%eax\n\t", ast->c);
       break;
     default:
       emit_binop(ast);
@@ -372,16 +288,23 @@ void print_quote(char *p) {
   }
 }
 
-
 void print_ast(AST *ast) {
   switch (ast->type) {
-    case AST_NUMBER:
-      printf("%d", ast->num_val);
+    case AST_INT:
+      printf("%d", ast->ival);
+      break;
+    case AST_CHAR:
+      printf("'%c'", ast->c);
       break;
     case AST_VAR:
       printf("%s", ast->vname);
       break;
-    case AST_FUNCTION_CALL:
+    case AST_STR:
+      printf("\"");
+      print_quote(ast->sval);
+      printf("\"");
+      break;
+    case AST_FUNCALL:
       printf("%s(", ast->fname);
       for (int i = 0; ast->args[i]; i++) {
         print_ast(ast->args[i]);
@@ -389,14 +312,6 @@ void print_ast(AST *ast) {
           printf(",");
       }
       printf(")");
-      break;
-    case AST_STRING:
-      printf("\"");
-      print_quote(ast->sval);
-      printf("\"");
-      break;
-    case AST_CHARACTER:
-      printf("'%c'", ast->c);
       break;
     default:
       printf("(%c ", ast->type);
@@ -408,8 +323,7 @@ void print_ast(AST *ast) {
 }
 
 void emit_data_section(void) {
-  if (!strings)
-    return;
+  if (!strings) return;
   printf("\t.data\n");
   for (AST *p = strings; p; p = p->snext) {
     printf(".s%d:\n\t", p->sid);
@@ -419,7 +333,6 @@ void emit_data_section(void) {
   }
   printf("\t");
 }
-
 
 int main(int argc, char **argv) {
   int wantast = (argc > 1 && !strcmp(argv[1], "-a"));
