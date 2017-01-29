@@ -13,12 +13,14 @@ enum {
   AST_VAR,
   AST_FUNCTION_CALL,
   AST_STRING,
+  AST_CHARACTER,
 };
 
 typedef struct AST {
   char type;
   union {
     int num_val; // Ints
+    char c; // for char
     struct {     //for Strings
       char *sval;
       int sid;
@@ -28,7 +30,7 @@ typedef struct AST {
     struct {    // Variable
       char *vname;
       int vpos;
-      struct Ast *vnext;
+      struct AST *vnext;
     };
     struct {    // Binary
       struct AST *left;
@@ -49,7 +51,7 @@ void error(char *fmt, ...) __attribute__((noreturn));
 AST *read_expr(void);
 void emit_expr(AST *ast);
 AST *read_expr2(int prec);
-AST *read_string(void);
+
 
 void error(char *fmt, ...) {
   va_list args;
@@ -59,6 +61,14 @@ void error(char *fmt, ...) {
   va_end(args);
   exit(1);
 }
+
+AST *make_ast_char(char c) {
+  AST *r = malloc(sizeof(AST));
+  r->type = AST_CHARACTER;
+  r->c = c;
+  return r;
+}
+
 
 AST *make_ast_op(char type, AST *left, AST *right) {
   AST *r = malloc(sizeof(AST));
@@ -203,18 +213,23 @@ AST *read_ident_or_func(char c) {
   return v ? v : make_ast_var(name);
 }
 
-
-AST *read_prim(void) {
-  int c = getc(stdin);
-  if (isdigit(c))
-    return read_number(c - '0');
-  if (c == '"')
-    return read_string();
-  if (isalpha(c))
-    return read_ident_or_func(c);
-  else if (c == EOF)
-    return NULL;
-  error("Don't know how to handle '%c'", c);
+AST *read_char(void) {
+  char c = getc(stdin);
+  if (c == EOF) 
+    goto err;
+  if (c == '\\') {
+    c = getc(stdin);
+    if (c == EOF) 
+      goto err;
+  }
+  char c2 = getc(stdin);
+  if (c2 == EOF) 
+    goto err;
+  if (c2 != '\'')
+    error("Malformed char constant");
+  return make_ast_char(c);
+err:
+  error("Unterminated char");
 }
 
 AST *read_string(void) {
@@ -238,6 +253,20 @@ AST *read_string(void) {
   return make_ast_str(buf);
 }
 
+AST *read_prim(void) {
+  int c = getc(stdin);
+  if (isdigit(c))
+    return read_number(c - '0');
+  if (c == '"')
+    return read_string();
+  if (c == '\'')
+    return read_char();
+  if (isalpha(c))
+    return read_ident_or_func(c);
+  else if (c == EOF)
+    return NULL;
+  error("Don't know how to handle '%c'", c);
+}
 
 AST *read_expr2(int prec) {
   skip_space();
@@ -326,6 +355,9 @@ void emit_expr(AST *ast) {
     case AST_STRING:
       printf("lea .s%d(%%rip), %%rax\n\t", ast->sid);
       break;
+    case AST_CHARACTER:
+      printf("mov $%d, %%eax\n\t", ast->c);
+      break;
     default:
       emit_binop(ast);
   }
@@ -362,6 +394,9 @@ void print_ast(AST *ast) {
       printf("\"");
       print_quote(ast->sval);
       printf("\"");
+      break;
+    case AST_CHARACTER:
+      printf("'%c'", ast->c);
       break;
     default:
       printf("(%c ", ast->type);
