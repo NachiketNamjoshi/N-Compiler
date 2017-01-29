@@ -6,11 +6,13 @@
 
 #define MAX_BUFFER_LENGTH 256
 #define MAX_ARGS 6
+#define EXPR_LEN 100
 
 enum {
   AST_NUMBER,
   AST_SYMBOL,
   AST_FUNCTION_CALL,
+  AST_STRING,
 };
 
 typedef struct Var {
@@ -24,6 +26,11 @@ typedef struct AST {
   union {
     int num_val;
     char *str_val;
+    struct {
+      char *sval;
+      int sid;
+      struct AST *snext;
+    };
     Var *var;
     struct {
       struct AST *left;
@@ -38,11 +45,13 @@ typedef struct AST {
 }  AST;
 
 Var *vars = NULL;
+AST *strings = NULL;
 char *REGS[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 void error(char *fmt, ...) __attribute__((noreturn));
 AST *read_expr(void);
 void emit_expr(AST *ast);
 AST *read_expr2(int prec);
+AST *read_string(void);
 
 void error(char *fmt, ...) {
   va_list args;
@@ -72,6 +81,21 @@ AST *make_ast_sym(Var *var) {
   AST *r = malloc(sizeof(AST));
   r->type = AST_SYMBOL;
   r->var =var;
+  return r;
+}
+
+AST *make_ast_str(char *str) {
+  AST *r = malloc(sizeof(AST));
+  r->type = AST_STRING;
+  r->sval = str;
+  if (strings == NULL) {
+    r->sid = 0;
+    r->snext = NULL;
+  } else {
+    r->sid = strings->sid + 1;
+    r->snext = strings;
+  }
+  strings = r;
   return r;
 }
 
@@ -193,12 +217,36 @@ AST *read_prim(void) {
   int c = getc(stdin);
   if (isdigit(c))
     return read_number(c - '0');
+  if (c == '"')
+    return read_string();
   if (isalpha(c))
     return read_ident_or_func(c);
   else if (c == EOF)
     return NULL;
   error("Don't know how to handle '%c'", c);
 }
+
+AST *read_string(void) {
+  char *buf = malloc(MAX_BUFFER_LENGTH);
+  int i = 0;
+  for (;;) {
+    int c = getc(stdin);
+    if (c == EOF)
+      error("Unterminated string");
+    if (c == '"')
+      break;
+    if (c == '\\') {
+      c = getc(stdin);
+     if (c == EOF) error("Unterminated \\");
+    }
+    buf[i++] = c;
+    if (i == MAX_BUFFER_LENGTH - 1)
+      error("String too long");
+  }
+  buf[i] = '\0';
+  return make_ast_str(buf);
+}
+
 
 AST *read_expr2(int prec) {
   skip_space();
@@ -284,10 +332,23 @@ void emit_expr(AST *ast) {
       for (int i = ast->nargs - 1; i > 0; i--)
         printf("pop %%%s\n\t", REGS[i]);
       break;
+    case AST_STRING:
+      printf("lea .s%d(%%rip), %%rax\n\t", ast->sid);
+      break;
     default:
       emit_binop(ast);
   }
 }
+
+void print_quote(char *p) {
+  while (*p) {
+    if (*p == '\"' || *p == '\\')
+      printf("\\");
+    printf("%c", *p);
+    p++;
+  }
+}
+
 
 void print_ast(AST *ast) {
   switch (ast->type) {
@@ -306,6 +367,11 @@ void print_ast(AST *ast) {
       }
       printf(")");
       break;
+    case AST_STRING:
+      printf("\"");
+      print_quote(ast->sval);
+      printf("\"");
+      break;
     default:
       printf("(%c ", ast->type);
       print_ast(ast->left);
@@ -315,20 +381,41 @@ void print_ast(AST *ast) {
   }
 }
 
+void emit_data_section(void) {
+  if (!strings)
+    return;
+  printf("\t.data\n");
+  for (AST *p = strings; p; p = p->snext) {
+    printf(".s%d:\n\t", p->sid);
+    printf(".string \"");
+    print_quote(p->sval);
+    printf("\"\n");
+  }
+  printf("\t");
+}
+
+
 int main(int argc, char **argv) {
   int wantast = (argc > 1 && !strcmp(argv[1], "-a"));
+  AST *exprs[EXPR_LEN];
+  int i;
+  for (i = 0; i < EXPR_LEN; i++) {
+    AST *t = read_expr();
+    if (!t) break;
+    exprs[i] = t;
+  }
+  int nexpr = i;
   if (!wantast) {
+    emit_data_section();
     printf(".text\n\t"
            ".global mymain\n"
            "mymain:\n\t");
   }
-  for (;;) {
-    AST *ast = read_expr();
-    if (!ast) break;
+  for (i = 0; i < nexpr; i++) {
     if (wantast)
-      print_ast(ast);
+      print_ast(exprs[i]);
     else
-      emit_expr(ast);
+      emit_expr(exprs[i]);
   }
   if (!wantast)
     printf("ret\n");
