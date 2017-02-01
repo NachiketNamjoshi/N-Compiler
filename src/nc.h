@@ -1,5 +1,5 @@
-#ifndef ECC_H
-#define ECC_H
+#ifndef NC_H
+#define NC_H
 
 #include <stdbool.h>
 
@@ -27,7 +27,10 @@ typedef struct {
   int len;
 } String;
 
-extern void error(char *fmt, ...) __attribute__((noreturn));
+#define error(...)                              \
+  errorf(__FILE__, __LINE__, __VA_ARGS__)
+
+extern void errorf(char *fmt, ...) __attribute__((noreturn));
 
 extern String *make_string(void);
 extern char *get_cstring(String *s);
@@ -40,4 +43,4 @@ extern void unget_token(Token *tok);
 extern Token *peek_token(void);
 extern Token *read_token(void);
 
-#endif /* ECC_H */
+#endif /* NC_H */

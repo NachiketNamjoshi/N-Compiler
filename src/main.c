@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdarg.h>
 #include <string.h>
 #include "nc.h"
 
@@ -68,19 +67,12 @@ static char *REGS[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 
 static void emit_expr(AST *ast);
 static AST *read_expr(int prec);
+static char *ast_to_string(AST *ast);
 
-void error(char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  vfprintf(stderr, fmt, args);
-  fprintf(stderr, "\n");
-  va_end(args);
-  exit(1);
-}
-
-static AST *make_ast_op(char type, AST *left, AST *right) {
+static AST *make_ast_op(char type, char ctype, AST *left, AST *right) {
   AST *r = malloc(sizeof(AST));
   r->type = type;
+  r->ctype = ctype;
   r->left = left;
   r->right = right;
   return r;
@@ -89,6 +81,7 @@ static AST *make_ast_op(char type, AST *left, AST *right) {
 static AST *make_ast_int(int val) {
   AST *r = malloc(sizeof(AST));
   r->type = AST_INT;
+  r->ctype = CTYPE_INT;
   r->ival = val;
   return r;
 }
@@ -96,6 +89,7 @@ static AST *make_ast_int(int val) {
 static AST *make_ast_char(char c) {
   AST *r = malloc(sizeof(AST));
   r->type = AST_CHAR;
+  r->ctype = CTYPE_CHAR;
   r->c = c;
   return r;
 }
@@ -114,6 +108,7 @@ static AST *make_ast_var(int ctype, char *vname) {
 static AST *make_ast_string(char *str) {
   AST *r = malloc(sizeof(AST));
   r->type = AST_STR;
+  r->ctype = CTYPE_STR;
   r->sval = str;
   if (strings == NULL) {
     r->sid = 0;
@@ -129,6 +124,7 @@ static AST *make_ast_string(char *str) {
 static AST *make_ast_funcall(char *fname, int nargs, AST **args) {
   AST *r = malloc(sizeof(AST));
   r->type = AST_FUNCALL;
+  r->ctype = CTYPE_INT;
   r->fname = fname;
   r->nargs = nargs;
   r->args = args;
@@ -149,6 +145,10 @@ static AST *find_var(char *name) {
       return p;
   }
   return NULL;
+}
+
+static bool is_right_assoc(char op) {
+  return op == '=';
 }
 
 static int priority(char op) {
@@ -218,6 +218,46 @@ static void ensure_lvalue(AST *ast) {
     error("variable expected");
 }
 
+#define swap(a, b)                              \
+  { typeof(a) tmp = b; b = a; a = tmp; }
+
+static char result_type(char op, AST *a, AST *b) {
+  int swapped = false;
+  if (a->ctype > b->ctype) {
+    swapped = true;
+    swap(a, b);
+  }
+  switch (a->ctype) {
+    case CTYPE_VOID:
+      goto err;
+    case CTYPE_INT:
+      switch (b->ctype) {
+        case CTYPE_INT:
+        case CTYPE_CHAR:
+          return CTYPE_INT;
+        case CTYPE_STR:
+          goto err;
+      }
+      error("internal error");
+    case CTYPE_CHAR:
+      switch (b->ctype) {
+        case CTYPE_CHAR:
+          return CTYPE_INT;
+        case CTYPE_STR:
+          goto err;
+      }
+      error("internal error");
+    case CTYPE_STR:
+      goto err;
+    default:
+      error("internal error");
+  }
+err:
+  if (swapped) swap(a, b);
+  error("incompatible operands: %s and %s for %c",
+        ast_to_string(a), ast_to_string(b), op);
+}
+
 static AST *read_expr(int prec) {
   AST *ast = read_prim();
   if (!ast) return NULL;
@@ -234,7 +274,9 @@ static AST *read_expr(int prec) {
     }
     if (is_punct(tok, '='))
       ensure_lvalue(ast);
-    ast = make_ast_op(tok->punct, ast, read_expr(prec2 + 1));
+    AST *rest = read_expr(prec2 + (is_right_assoc(tok->punct) ? 0 : 1));
+    char ctype = result_type(tok->punct, ast, rest);
+    ast = make_ast_op(tok->punct, ctype, ast, rest);
   }
 }
 
@@ -350,13 +392,15 @@ static void emit_expr(AST *ast) {
   }
 }
 
-static void print_quote(char *p) {
+static char *quote(char *p) {
+  String *s = make_string();
   while (*p) {
     if (*p == '\"' || *p == '\\')
-      printf("\\");
-    printf("%c", *p);
+      string_append(s, '\\');
+    string_append(s, *p);
     p++;
   }
+  return get_cstring(s);
 }
 
 static char *ctype_to_string(int ctype) {
@@ -369,45 +413,47 @@ static char *ctype_to_string(int ctype) {
   }
 }
 
-static void print_ast(AST *ast) {
+static void ast_to_string_int(AST *ast, String *buf) {
   switch (ast->type) {
     case AST_INT:
-      printf("%d", ast->ival);
+      string_appendf(buf, "%d", ast->ival);
       break;
     case AST_CHAR:
-      printf("'%c'", ast->c);
+      string_appendf(buf, "'%c'", ast->c);
       break;
     case AST_VAR:
-      printf("%s", ast->vname);
+      string_appendf(buf, "%s", ast->vname);
       break;
     case AST_STR:
-      printf("\"");
-      print_quote(ast->sval);
-      printf("\"");
+      string_appendf(buf, "\"%s\"", quote(ast->sval));
       break;
     case AST_FUNCALL:
-      printf("%s(", ast->fname);
+      string_appendf(buf, "%s(", ast->fname);
       for (int i = 0; ast->args[i]; i++) {
-        print_ast(ast->args[i]);
+        string_appendf(buf, "%s", ast_to_string(ast->args[i]));
         if (ast->args[i + 1])
-          printf(",");
+          string_appendf(buf, ",");
       }
-      printf(")");
+      string_appendf(buf, ")");
       break;
     case AST_DECL:
-      printf("(decl %s %s ",
-             ctype_to_string(ast->decl_var->ctype),
-             ast->decl_var->vname);
-      print_ast(ast->decl_init);
-      printf(")");
+      string_appendf(buf, "(decl %s %s %s)",
+                     ctype_to_string(ast->decl_var->ctype),
+                     ast->decl_var->vname,
+                     ast_to_string(ast->decl_init));
       break;
-    default:
-      printf("(%c ", ast->type);
-      print_ast(ast->left);
-      printf(" ");
-      print_ast(ast->right);
-      printf(")");
+    default: {
+      char *left = ast_to_string(ast->left);
+      char *right = ast_to_string(ast->right);
+      string_appendf(buf, "(%c %s %s)", ast->type, left, right);
+    }
   }
+}
+
+static char *ast_to_string(AST *ast) {
+  String *s = make_string();
+  ast_to_string_int(ast, s);
+  return get_cstring(s);
 }
 
 static void emit_data_section(void) {
@@ -415,9 +461,7 @@ static void emit_data_section(void) {
   printf("\t.data\n");
   for (AST *p = strings; p; p = p->snext) {
     printf(".s%d:\n\t", p->sid);
-    printf(".string \"");
-    print_quote(p->sval);
-    printf("\"\n");
+    printf(".string \"%s\"\n", quote(p->sval));
   }
   printf("\t");
 }
@@ -440,7 +484,7 @@ int main(int argc, char **argv) {
   }
   for (i = 0; i < nexpr; i++) {
     if (wantast)
-      print_ast(exprs[i]);
+      printf("%s", ast_to_string(exprs[i]));
     else
       emit_expr(exprs[i]);
   }
