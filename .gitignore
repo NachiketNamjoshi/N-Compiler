@@ -34,3 +34,7 @@
 nc
 *.s
 unittest
+
+# Docs
+*.out
+*.gz
